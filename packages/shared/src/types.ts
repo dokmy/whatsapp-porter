@@ -31,6 +31,7 @@ export interface ChatMessage {
   fileSizeBytes: number;
   thumbnail: string | null;
   cachePath: string | null;
+  albumId: string | null;
   caption: string | null;
   queueStatus: QueueStatus;
   forwarded: boolean;

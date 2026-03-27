@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { prisma } from '../db';
+import { getWASocket } from '../whatsapp/connection';
+import { logger } from '../utils/logger';
 
 const router = Router();
 
-// List monitored groups
 router.get('/', async (_req, res) => {
   const monitored = await prisma.monitoredGroup.findMany({
     include: { group: true },
@@ -12,25 +13,47 @@ router.get('/', async (_req, res) => {
   res.json(monitored);
 });
 
-// Add a group to monitor
+// Add one or more groups to monitor
 router.post('/', async (req, res) => {
-  const { groupId, savePath } = req.body;
-  if (!groupId) return res.status(400).json({ error: 'groupId is required' });
+  const { groupId, groupIds, savePath } = req.body;
+  const ids: string[] = groupIds || (groupId ? [groupId] : []);
+  if (ids.length === 0) return res.status(400).json({ error: 'groupId or groupIds required' });
 
-  const existing = await prisma.monitoredGroup.findUnique({ where: { groupId } });
-  if (existing) return res.status(409).json({ error: 'Group already monitored' });
+  const results = [];
+  for (const gid of ids) {
+    const existing = await prisma.monitoredGroup.findUnique({ where: { groupId: gid } });
+    if (existing) continue;
 
-  const monitored = await prisma.monitoredGroup.create({
-    data: { groupId, savePath: savePath || '' },
-    include: { group: true },
-  });
-  res.status(201).json(monitored);
+    const monitored = await prisma.monitoredGroup.create({
+      data: { groupId: gid, savePath: savePath || '' },
+      include: { group: true },
+    });
+    results.push(monitored);
+  }
+
+  // Try to load message history for newly added groups
+  const sock = getWASocket();
+  if (sock) {
+    for (const gid of ids) {
+      try {
+        // Request messages from WhatsApp for this chat
+        // This triggers message history fetch for the specific chat
+        const messages = await sock.fetchMessageHistory(50, { remoteJid: gid, fromMe: false, id: '' } as any, {});
+        if (messages && messages.length > 0) {
+          logger.info(`Loaded ${messages.length} history messages for group`, undefined, 'system');
+        }
+      } catch {
+        // fetchMessageHistory may not be available in all Baileys versions
+        // History will come through normal sync instead
+      }
+    }
+  }
+
+  res.status(201).json(results);
 });
 
-// Update a monitored group (save path, enabled)
 router.put('/:groupId', async (req, res) => {
   const { savePath, enabled } = req.body;
-
   const data: Record<string, unknown> = {};
   if (savePath !== undefined) data.savePath = savePath;
   if (enabled !== undefined) data.enabled = enabled;
@@ -43,7 +66,6 @@ router.put('/:groupId', async (req, res) => {
   res.json(monitored);
 });
 
-// Remove a group from monitoring
 router.delete('/:groupId', async (req, res) => {
   await prisma.monitoredGroup.delete({ where: { groupId: req.params.groupId } });
   res.json({ message: 'Removed' });

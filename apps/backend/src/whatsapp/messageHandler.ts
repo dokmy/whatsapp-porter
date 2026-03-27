@@ -10,6 +10,10 @@ import path from 'path';
 import fs from 'fs-extra';
 
 const CACHE_DIR = path.join(process.cwd(), '.media-cache');
+const ALBUM_WINDOW_MS = 30_000; // 30s window to group album items
+
+// Track recent media for album detection
+const recentMedia: Map<string, { albumId: string; timestamp: number }> = new Map();
 
 function getMediaType(message: WAMessage): MediaType | null {
   const msg = message.message;
@@ -68,6 +72,22 @@ function getExtFromMime(mimetype: string | undefined, mediaType: MediaType): str
   return map[ext] || ext;
 }
 
+function detectAlbumId(groupId: string, senderJid: string, timestamp: number): string {
+  const key = `${groupId}:${senderJid}`;
+  const recent = recentMedia.get(key);
+
+  if (recent && (timestamp - recent.timestamp) < ALBUM_WINDOW_MS) {
+    // Part of existing album
+    recentMedia.set(key, { albumId: recent.albumId, timestamp });
+    return recent.albumId;
+  }
+
+  // New album
+  const albumId = `album-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  recentMedia.set(key, { albumId, timestamp });
+  return albumId;
+}
+
 async function storeMessage(sock: WASocket, message: WAMessage, isHistory: boolean = false) {
   const remoteJid = message.key.remoteJid;
   if (!remoteJid || !remoteJid.endsWith('@g.us')) return;
@@ -84,10 +104,15 @@ async function storeMessage(sock: WASocket, message: WAMessage, isHistory: boole
     : new Date();
 
   const monitored = await prisma.monitoredGroup.findUnique({ where: { groupId: remoteJid } });
-  // Only queue media from others, never our own messages
   const shouldQueue = !isFromMe && monitored?.enabled && mediaType && !isHistory;
 
-  // Download media immediately for monitored groups (before the link expires)
+  // Detect album grouping for media messages
+  let albumId: string | null = null;
+  if (mediaType && !isFromMe) {
+    albumId = detectAlbumId(remoteJid, senderJid, timestamp.getTime());
+  }
+
+  // Download media immediately for monitored groups
   let cachePath: string | undefined;
   let generatedCaption: string | undefined;
 
@@ -100,7 +125,6 @@ async function storeMessage(sock: WASocket, message: WAMessage, isHistory: boole
       cachePath = path.join(CACHE_DIR, cacheFileName);
       await fs.writeFile(cachePath, buffer);
 
-      // Get group name for caption
       const group = await prisma.group.findUnique({ where: { id: remoteJid } });
       generatedCaption = buildCaption(null, {
         groupName: group?.name || remoteJid,
@@ -130,6 +154,7 @@ async function storeMessage(sock: WASocket, message: WAMessage, isHistory: boole
         fileSizeBytes,
         thumbnail: thumbnail || null,
         cachePath: cachePath || null,
+        albumId,
         caption: generatedCaption || null,
         queueStatus: shouldQueue ? 'queued' : 'none',
         timestamp,
@@ -149,6 +174,7 @@ async function storeMessage(sock: WASocket, message: WAMessage, isHistory: boole
         fileSizeBytes,
         thumbnail: stored.thumbnail,
         cachePath: stored.cachePath,
+        albumId: stored.albumId,
         caption: stored.caption,
         queueStatus: stored.queueStatus,
         forwarded: false,

@@ -26,7 +26,6 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [destinationId, setDestinationId] = useState('');
   const [page, setPage] = useState<Page>('chat');
-  const [addGroupId, setAddGroupId] = useState('');
 
   useEffect(() => {
     socket.emit(SOCKET_EVENTS.CONNECTION_REQUEST_STATUS);
@@ -67,14 +66,13 @@ export default function App() {
     } catch { setMessages([]); }
   }, []);
 
-  const addMonitoredGroup = async () => {
-    if (!addGroupId) return;
+  const addMonitoredGroup = async (groupIds: string[]) => {
+    if (groupIds.length === 0) return;
     try {
-      const m = await apiFetch<MonitoredGroup>('/api/monitored', {
-        method: 'POST', body: JSON.stringify({ groupId: addGroupId }),
+      const results = await apiFetch<MonitoredGroup[]>('/api/monitored', {
+        method: 'POST', body: JSON.stringify({ groupIds }),
       });
-      setMonitored(prev => [...prev, m]);
-      setAddGroupId('');
+      setMonitored(prev => [...prev, ...results]);
     } catch {}
   };
 
@@ -216,7 +214,7 @@ export default function App() {
       <div className="flex-1 flex flex-col min-w-0">
         {page === 'config' ? (
           <ConfigPanel allGroups={allGroups} monitored={monitored} unmonitoredGroups={unmonitoredGroups}
-            addGroupId={addGroupId} setAddGroupId={setAddGroupId} addMonitoredGroup={addMonitoredGroup}
+            addMonitoredGroup={addMonitoredGroup}
             removeMonitored={removeMonitored} updateSavePath={updateSavePath}
             destinationId={destinationId} saveDestination={saveDestination} />
         ) : page === 'jarvis' ? (
@@ -489,9 +487,13 @@ function JarvisChat() {
 }
 
 // ─── Queue Page ──────────────────────────────────
+type QueueItem = ChatMessage & { group?: { name: string } };
+
 function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
-  const [items, setItems] = useState<(ChatMessage & { group?: { name: string } })[]>([]);
+  const [items, setItems] = useState<QueueItem[]>([]);
   const [filter, setFilter] = useState<'queued' | 'forwarded' | 'failed' | 'all'>('queued');
+  const [sortBy, setSortBy] = useState<'recency' | 'group'>('recency');
+  const [consolidate, setConsolidate] = useState(true);
   const [loading, setLoading] = useState(true);
   const [forwarding, setForwarding] = useState<Set<string>>(new Set());
   const [editingCaption, setEditingCaption] = useState<string | null>(null);
@@ -500,14 +502,13 @@ function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiFetch<(ChatMessage & { group?: { name: string } })[]>(`/api/queue?status=${filter}`);
+      const data = await apiFetch<QueueItem[]>(`/api/queue?status=${filter}&sortBy=${sortBy}`);
       setItems(data);
-      // Initialize caption drafts
       const drafts: Record<string, string> = {};
       data.forEach(d => { drafts[d.id] = d.caption || ''; });
       setCaptionDrafts(prev => ({ ...prev, ...drafts }));
     } catch {} finally { setLoading(false); }
-  }, [filter]);
+  }, [filter, sortBy]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -522,14 +523,10 @@ function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
     return () => { socket.off(SOCKET_EVENTS.QUEUE_UPDATE, handler); };
   }, [socket]);
 
-  // Also listen for new queue items
   useEffect(() => {
     const handler = (msg: ChatMessage) => {
       if (msg.queueStatus === 'queued') {
-        setItems(prev => {
-          if (prev.some(i => i.id === msg.id)) return prev;
-          return [msg, ...prev];
-        });
+        setItems(prev => prev.some(i => i.id === msg.id) ? prev : [msg, ...prev]);
         setCaptionDrafts(prev => ({ ...prev, [msg.id]: msg.caption || '' }));
       }
     };
@@ -539,28 +536,20 @@ function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
 
   const saveCaption = async (id: string) => {
     const caption = captionDrafts[id] ?? '';
-    await apiFetch(`/api/queue/${id}/caption`, {
-      method: 'PUT', body: JSON.stringify({ caption }),
-    }).catch(() => {});
+    await apiFetch(`/api/queue/${id}/caption`, { method: 'PUT', body: JSON.stringify({ caption }) }).catch(() => {});
     setItems(prev => prev.map(i => i.id === id ? { ...i, caption } : i));
     setEditingCaption(null);
   };
 
   const forwardOne = async (id: string) => {
     setForwarding(prev => new Set(prev).add(id));
-    const caption = captionDrafts[id];
-    try {
-      await apiFetch(`/api/queue/${id}/forward`, {
-        method: 'POST', body: JSON.stringify({ caption }),
-      });
-    } catch {}
+    try { await apiFetch(`/api/queue/${id}/forward`, { method: 'POST', body: JSON.stringify({ caption: captionDrafts[id] }) }); } catch {}
   };
 
-  const forwardAll = async () => {
-    const queued = items.filter(i => i.queueStatus === 'queued');
-    for (const item of queued) {
-      await forwardOne(item.id);
-    }
+  const forwardAlbum = async (albumId: string) => {
+    const albumItems = items.filter(i => i.albumId === albumId);
+    albumItems.forEach(i => setForwarding(prev => new Set(prev).add(i.id)));
+    try { await apiFetch(`/api/queue/album/${albumId}/forward`, { method: 'POST', body: JSON.stringify({ caption: captionDrafts[albumItems[0]?.id] }) }); } catch {}
   };
 
   const dismiss = async (id: string) => {
@@ -568,7 +557,138 @@ function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
     setItems(prev => prev.filter(i => i.id !== id));
   };
 
+  const dismissAlbum = async (albumId: string) => {
+    await apiFetch(`/api/queue/album/${albumId}/dismiss`, { method: 'POST' }).catch(() => {});
+    setItems(prev => prev.filter(i => i.albumId !== albumId));
+  };
+
+  // Group items by album
+  type DisplayItem = { type: 'single'; item: QueueItem } | { type: 'album'; albumId: string; items: QueueItem[] };
+
+  const buildDisplayItems = (): DisplayItem[] => {
+    if (!consolidate) return items.map(item => ({ type: 'single' as const, item }));
+    const seen = new Set<string>();
+    const result: DisplayItem[] = [];
+    for (const item of items) {
+      if (item.albumId && !seen.has(item.albumId)) {
+        seen.add(item.albumId);
+        const albumItems = items.filter(i => i.albumId === item.albumId);
+        result.push(albumItems.length > 1 ? { type: 'album', albumId: item.albumId, items: albumItems } : { type: 'single', item });
+      } else if (!item.albumId) {
+        result.push({ type: 'single', item });
+      }
+    }
+    return result;
+  };
+
+  // Group display items by group name
+  const groupByGroupName = (displayItems: DisplayItem[]) => {
+    const map: Record<string, { name: string; items: DisplayItem[] }> = {};
+    for (const di of displayItems) {
+      const firstItem = di.type === 'album' ? di.items[0] : di.item;
+      const groupName = (firstItem as any).group?.name || firstItem.groupId;
+      if (!map[groupName]) map[groupName] = { name: groupName, items: [] };
+      map[groupName].items.push(di);
+    }
+    return Object.values(map);
+  };
+
+  const displayItems = buildDisplayItems();
+  const groupedByGroup = sortBy === 'group' ? groupByGroupName(displayItems) : null;
   const queuedCount = items.filter(i => i.queueStatus === 'queued').length;
+
+  const renderItem = (di: DisplayItem) => {
+    if (di.type === 'album') {
+      const first = di.items[0];
+      const allQueued = di.items.every(i => i.queueStatus === 'queued');
+      const anyForwarding = di.items.some(i => forwarding.has(i.id));
+      return (
+        <div key={di.albumId} className="p-4 bg-gray-800/50 rounded-xl border border-gray-700/50 space-y-3">
+          <div className="flex gap-3">
+            <div className="flex gap-1 shrink-0">
+              {di.items.slice(0, 4).map(item => (
+                <div key={item.id} className="shrink-0">
+                  {item.thumbnail ? (
+                    <img src={`data:image/jpeg;base64,${item.thumbnail}`} alt="" className="w-16 h-16 rounded-lg object-cover border border-gray-700" />
+                  ) : (
+                    <div className="w-16 h-16 rounded-lg bg-gray-700 flex items-center justify-center text-xl">🖼</div>
+                  )}
+                </div>
+              ))}
+              {di.items.length > 4 && <div className="w-16 h-16 rounded-lg bg-gray-700 flex items-center justify-center text-xs text-gray-400">+{di.items.length - 4}</div>}
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-medium">{first.senderName}</span>
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/40 text-indigo-400 border border-indigo-800">Album ({di.items.length})</span>
+                <QueueChip status={first.queueStatus} />
+              </div>
+              <p className="text-xs text-gray-400 mt-0.5">{di.items.length} media items</p>
+              <p className="text-[10px] text-gray-600 mt-0.5">{new Date(first.timestamp).toLocaleString()}</p>
+            </div>
+            <div className="shrink-0 flex flex-col gap-1.5">
+              {allQueued && (
+                <button onClick={() => forwardAlbum(di.albumId)} disabled={anyForwarding}
+                  className="px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded-lg text-xs font-medium transition-colors">
+                  {anyForwarding ? 'Sending...' : `Forward Album (${di.items.length})`}
+                </button>
+              )}
+              {allQueued && (
+                <button onClick={() => dismissAlbum(di.albumId)}
+                  className="px-4 py-1.5 text-xs text-gray-500 hover:text-gray-300 hover:bg-gray-700 rounded-lg transition-colors">Dismiss</button>
+              )}
+            </div>
+          </div>
+          {/* Caption */}
+          <CaptionEditor item={first} editingCaption={editingCaption} setEditingCaption={setEditingCaption}
+            captionDrafts={captionDrafts} setCaptionDrafts={setCaptionDrafts} saveCaption={saveCaption} />
+        </div>
+      );
+    }
+
+    const item = di.item;
+    return (
+      <div key={item.id} className="p-4 bg-gray-800/50 rounded-xl border border-gray-700/50 space-y-3">
+        <div className="flex gap-3">
+          <div className="shrink-0">
+            {item.thumbnail ? (
+              <img src={`data:image/jpeg;base64,${item.thumbnail}`} alt="" className="w-20 h-20 rounded-lg object-cover border border-gray-700" />
+            ) : (
+              <div className="w-20 h-20 rounded-lg bg-gray-700 flex items-center justify-center text-2xl">
+                {item.mediaType === 'image' ? '🖼' : item.mediaType === 'video' ? '🎬' : item.mediaType === 'audio' ? '🎵' : '📄'}
+              </div>
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-medium">{item.senderName}</span>
+              <QueueChip status={item.queueStatus} />
+            </div>
+            <p className="text-xs text-gray-400 mt-0.5">
+              {item.mediaType}{item.fileName ? ` — ${item.fileName}` : ''}
+              {item.fileSizeBytes > 0 ? ` (${(item.fileSizeBytes / 1024).toFixed(0)} KB)` : ''}
+            </p>
+            {item.error && <p className="text-xs text-red-400 mt-1">{item.error}</p>}
+            <p className="text-[10px] text-gray-600 mt-0.5">{new Date(item.timestamp).toLocaleString()}</p>
+          </div>
+          <div className="shrink-0 flex flex-col gap-1.5">
+            {(item.queueStatus === 'queued' || item.queueStatus === 'failed') && (
+              <button onClick={() => forwardOne(item.id)} disabled={forwarding.has(item.id)}
+                className="px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded-lg text-xs font-medium transition-colors">
+                {forwarding.has(item.id) ? 'Sending...' : 'Forward'}
+              </button>
+            )}
+            {item.queueStatus === 'queued' && (
+              <button onClick={() => dismiss(item.id)} className="px-4 py-1.5 text-xs text-gray-500 hover:text-gray-300 hover:bg-gray-700 rounded-lg transition-colors">Dismiss</button>
+            )}
+            {item.queueStatus === 'forwarding' && <div className="w-5 h-5 border-2 border-gray-600 border-t-green-400 rounded-full animate-spin mx-auto" />}
+          </div>
+        </div>
+        <CaptionEditor item={item} editingCaption={editingCaption} setEditingCaption={setEditingCaption}
+          captionDrafts={captionDrafts} setCaptionDrafts={setCaptionDrafts} saveCaption={saveCaption} />
+      </div>
+    );
+  };
 
   return (
     <div className="flex-1 flex flex-col">
@@ -578,119 +698,82 @@ function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
           <p className="text-xs text-gray-500">{queuedCount} items waiting</p>
         </div>
         {queuedCount > 0 && (
-          <button onClick={forwardAll}
+          <button onClick={() => { items.filter(i => i.queueStatus === 'queued').forEach(i => forwardOne(i.id)); }}
             className="px-4 py-2 bg-green-600 hover:bg-green-500 rounded-lg text-sm font-medium transition-colors">
             Forward All ({queuedCount})
           </button>
         )}
       </div>
 
-      <div className="px-5 py-2 border-b border-gray-800 flex gap-2">
-        {(['queued', 'forwarded', 'failed', 'all'] as const).map(f => (
-          <button key={f} onClick={() => setFilter(f)}
-            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-              filter === f ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'
-            }`}>
-            {f.charAt(0).toUpperCase() + f.slice(1)}
+      <div className="px-5 py-2 border-b border-gray-800 flex items-center justify-between flex-wrap gap-2">
+        <div className="flex gap-1.5">
+          {(['queued', 'forwarded', 'failed', 'all'] as const).map(f => (
+            <button key={f} onClick={() => setFilter(f)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${filter === f ? 'bg-gray-700 text-white' : 'text-gray-500 hover:text-gray-300'}`}>
+              {f.charAt(0).toUpperCase() + f.slice(1)}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-1.5 items-center">
+          <button onClick={() => setSortBy(s => s === 'recency' ? 'group' : 'recency')}
+            className="px-3 py-1.5 rounded-lg text-xs text-gray-500 hover:text-gray-300 bg-gray-800 transition-colors">
+            Sort: {sortBy === 'recency' ? 'Recent' : 'By Group'}
           </button>
-        ))}
+          <button onClick={() => setConsolidate(c => !c)}
+            className={`px-3 py-1.5 rounded-lg text-xs transition-colors ${consolidate ? 'bg-indigo-900/40 text-indigo-400 border border-indigo-800' : 'text-gray-500 bg-gray-800'}`}>
+            {consolidate ? 'Albums grouped' : 'Flat view'}
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto chat-scroll p-4 space-y-3">
         {loading ? (
           <p className="text-gray-500 text-center py-12">Loading...</p>
-        ) : items.length === 0 ? (
+        ) : displayItems.length === 0 ? (
           <p className="text-gray-600 text-center py-12">No items in queue.</p>
-        ) : items.map(item => (
-          <div key={item.id} className="p-4 bg-gray-800/50 rounded-xl border border-gray-700/50 space-y-3">
-            <div className="flex gap-3">
-              {/* Thumbnail */}
-              <div className="shrink-0">
-                {item.thumbnail ? (
-                  <img src={`data:image/jpeg;base64,${item.thumbnail}`} alt=""
-                    className="w-20 h-20 rounded-lg object-cover border border-gray-700" />
-                ) : (
-                  <div className="w-20 h-20 rounded-lg bg-gray-700 flex items-center justify-center text-2xl">
-                    {item.mediaType === 'image' ? '🖼' : item.mediaType === 'video' ? '🎬' : item.mediaType === 'audio' ? '🎵' : '📄'}
-                  </div>
-                )}
-              </div>
-
-              {/* Info */}
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-sm font-medium">{item.senderName}</span>
-                  <span className="text-[10px] text-gray-500">{(item as any).group?.name || ''}</span>
-                  <QueueChip status={item.queueStatus} />
-                </div>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  {item.mediaType}{item.fileName ? ` — ${item.fileName}` : ''}
-                  {item.fileSizeBytes > 0 ? ` (${(item.fileSizeBytes / 1024).toFixed(0)} KB)` : ''}
-                </p>
-                {item.error && <p className="text-xs text-red-400 mt-1">{item.error}</p>}
-                <p className="text-[10px] text-gray-600 mt-0.5">{new Date(item.timestamp).toLocaleString()}</p>
-              </div>
-
-              {/* Actions */}
-              <div className="shrink-0 flex flex-col gap-1.5 justify-start">
-                {(item.queueStatus === 'queued' || item.queueStatus === 'failed') && (
-                  <button onClick={() => forwardOne(item.id)}
-                    disabled={forwarding.has(item.id)}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-500 disabled:opacity-50 rounded-lg text-xs font-medium transition-colors whitespace-nowrap">
-                    {forwarding.has(item.id) ? 'Sending...' : '📤 Forward'}
-                  </button>
-                )}
-                {item.queueStatus === 'queued' && (
-                  <button onClick={() => dismiss(item.id)}
-                    className="px-4 py-1.5 text-xs text-gray-500 hover:text-gray-300 hover:bg-gray-700 rounded-lg transition-colors">
-                    Dismiss
-                  </button>
-                )}
-                {item.queueStatus === 'forwarding' && (
-                  <div className="w-5 h-5 border-2 border-gray-600 border-t-green-400 rounded-full animate-spin mx-auto" />
-                )}
-              </div>
+        ) : groupedByGroup ? (
+          groupedByGroup.map(g => (
+            <div key={g.name} className="space-y-2">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 px-1 pt-2 border-b border-gray-800 pb-1">{g.name}</h3>
+              {g.items.map(renderItem)}
             </div>
-
-            {/* Caption - editable */}
-            <div className="border-t border-gray-700/50 pt-2">
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Caption (sent with media)</label>
-                {editingCaption !== item.id && item.queueStatus === 'queued' && (
-                  <button onClick={() => setEditingCaption(item.id)}
-                    className="text-[10px] text-gray-500 hover:text-gray-300 transition-colors">
-                    Edit
-                  </button>
-                )}
-              </div>
-              {editingCaption === item.id ? (
-                <div className="space-y-2">
-                  <textarea
-                    value={captionDrafts[item.id] ?? item.caption ?? ''}
-                    onChange={e => setCaptionDrafts(prev => ({ ...prev, [item.id]: e.target.value }))}
-                    rows={3}
-                    className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded-lg text-xs font-mono focus:outline-none focus:border-gray-400 resize-none"
-                  />
-                  <div className="flex gap-2">
-                    <button onClick={() => saveCaption(item.id)}
-                      className="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs font-medium transition-colors">
-                      Save
-                    </button>
-                    <button onClick={() => setEditingCaption(null)}
-                      className="px-3 py-1 text-xs text-gray-500 hover:text-gray-300 transition-colors">
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-xs text-gray-400 whitespace-pre-wrap font-mono bg-gray-900/50 rounded px-3 py-2 max-h-20 overflow-y-auto">
-                  {captionDrafts[item.id] || item.caption || '(no caption)'}
-                </p>
-              )}
-            </div>
-          </div>
-        ))}
+          ))
+        ) : (
+          displayItems.map(renderItem)
+        )}
       </div>
+    </div>
+  );
+}
+
+function CaptionEditor({ item, editingCaption, setEditingCaption, captionDrafts, setCaptionDrafts, saveCaption }: {
+  item: QueueItem; editingCaption: string | null; setEditingCaption: (v: string | null) => void;
+  captionDrafts: Record<string, string>; setCaptionDrafts: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  saveCaption: (id: string) => void;
+}) {
+  return (
+    <div className="border-t border-gray-700/50 pt-2">
+      <div className="flex items-center justify-between mb-1">
+        <label className="text-[10px] uppercase tracking-wider text-gray-500 font-semibold">Caption</label>
+        {editingCaption !== item.id && item.queueStatus === 'queued' && (
+          <button onClick={() => setEditingCaption(item.id)} className="text-[10px] text-gray-500 hover:text-gray-300">Edit</button>
+        )}
+      </div>
+      {editingCaption === item.id ? (
+        <div className="space-y-2">
+          <textarea value={captionDrafts[item.id] ?? item.caption ?? ''}
+            onChange={e => setCaptionDrafts(prev => ({ ...prev, [item.id]: e.target.value }))}
+            rows={3} className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded-lg text-xs font-mono focus:outline-none focus:border-gray-400 resize-none" />
+          <div className="flex gap-2">
+            <button onClick={() => saveCaption(item.id)} className="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs font-medium">Save</button>
+            <button onClick={() => setEditingCaption(null)} className="px-3 py-1 text-xs text-gray-500 hover:text-gray-300">Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <p className="text-xs text-gray-400 whitespace-pre-wrap font-mono bg-gray-900/50 rounded px-3 py-2 max-h-16 overflow-y-auto">
+          {captionDrafts[item.id] || item.caption || '(no caption)'}
+        </p>
+      )}
     </div>
   );
 }
@@ -704,11 +787,7 @@ function QueueChip({ status }: { status: QueueStatus }) {
     failed: 'bg-red-900/40 text-red-400 border-red-800',
   };
   if (status === 'none') return null;
-  return (
-    <span className={`text-[10px] px-1.5 py-0.5 rounded border ${styles[status]}`}>
-      {status}
-    </span>
-  );
+  return <span className={`text-[10px] px-1.5 py-0.5 rounded border ${styles[status]}`}>{status}</span>;
 }
 
 // ─── Logs Page ───────────────────────────────────
@@ -820,12 +899,68 @@ function LogsPage({ socket }: { socket: ReturnType<typeof useSocket> }) {
   );
 }
 
+// ─── Group Multi-Select ──────────────────────────
+function GroupMultiSelect({ groups, onAdd }: { groups: Group[]; onAdd: (ids: string[]) => void }) {
+  const [search, setSearch] = useState('');
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  const filtered = groups.filter(g =>
+    g.name.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const toggle = (id: string) => {
+    setSelected(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const handleAdd = () => {
+    onAdd(Array.from(selected));
+    setSelected(new Set());
+    setSearch('');
+  };
+
+  return (
+    <div className="space-y-2">
+      <input
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+        placeholder="Search groups..."
+        className="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-gray-500"
+      />
+      <div className="max-h-56 overflow-y-auto bg-gray-800 border border-gray-700 rounded-lg p-1.5 space-y-0.5 chat-scroll">
+        {filtered.length === 0 ? (
+          <p className="text-gray-500 text-sm p-2">
+            {groups.length === 0 ? 'All groups are already monitored.' : 'No groups match your search.'}
+          </p>
+        ) : filtered.map(g => (
+          <label key={g.id}
+            className={`flex items-center gap-2 px-2.5 py-2 rounded-lg cursor-pointer transition-colors ${
+              selected.has(g.id) ? 'bg-green-900/20 border border-green-800' : 'hover:bg-gray-700 border border-transparent'
+            }`}>
+            <input type="checkbox" checked={selected.has(g.id)} onChange={() => toggle(g.id)} className="rounded" />
+            <span className="text-sm flex-1">{g.name}</span>
+            <span className="text-[10px] text-gray-600">{g.participantCount}</span>
+          </label>
+        ))}
+      </div>
+      {selected.size > 0 && (
+        <button onClick={handleAdd}
+          className="px-5 py-2.5 bg-green-600 hover:bg-green-500 rounded-lg text-sm font-medium transition-colors">
+          + Add {selected.size} group{selected.size > 1 ? 's' : ''}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── Config Panel ────────────────────────────────
-function ConfigPanel({ allGroups, monitored, unmonitoredGroups, addGroupId, setAddGroupId,
+function ConfigPanel({ allGroups, monitored, unmonitoredGroups,
   addMonitoredGroup, removeMonitored, updateSavePath, destinationId, saveDestination }: {
   allGroups: Group[]; monitored: MonitoredGroup[]; unmonitoredGroups: Group[];
-  addGroupId: string; setAddGroupId: (v: string) => void;
-  addMonitoredGroup: () => void; removeMonitored: (id: string) => void;
+  addMonitoredGroup: (ids: string[]) => void; removeMonitored: (id: string) => void;
   updateSavePath: (id: string, p: string) => void;
   destinationId: string; saveDestination: (id: string) => void;
 }) {
@@ -867,18 +1002,8 @@ function ConfigPanel({ allGroups, monitored, unmonitoredGroups, addGroupId, setA
       </section>
 
       <section className="space-y-3">
-        <h3 className="font-semibold text-gray-300">Monitor a Group</h3>
-        <div className="flex gap-2">
-          <select value={addGroupId} onChange={e => setAddGroupId(e.target.value)}
-            className="flex-1 px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-gray-500">
-            <option value="">Select a group...</option>
-            {unmonitoredGroups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
-          </select>
-          <button onClick={addMonitoredGroup} disabled={!addGroupId}
-            className="px-5 py-2.5 bg-green-600 hover:bg-green-500 disabled:opacity-40 rounded-lg text-sm font-medium transition-colors">
-            + Add
-          </button>
-        </div>
+        <h3 className="font-semibold text-gray-300">Add Groups to Monitor</h3>
+        <GroupMultiSelect groups={unmonitoredGroups} onAdd={addMonitoredGroup} />
       </section>
 
       <section className="space-y-3">

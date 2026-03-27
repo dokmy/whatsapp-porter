@@ -122,3 +122,35 @@ export async function forwardQueuedMessage(messageId: string, customCaption?: st
     throw err;
   }
 }
+
+/**
+ * Forward all messages in an album.
+ * Sends them in quick succession so WhatsApp groups them visually as an album.
+ */
+export async function forwardAlbum(albumId: string, customCaption?: string): Promise<number> {
+  const messages = await prisma.message.findMany({
+    where: { albumId, queueStatus: { in: ['queued', 'failed'] } },
+    orderBy: { timestamp: 'asc' },
+  });
+
+  if (messages.length === 0) throw new Error('No queued messages in this album');
+
+  let forwarded = 0;
+  for (let i = 0; i < messages.length; i++) {
+    // Only apply caption to the first item, and only apply jitter before the first
+    const caption = i === 0 ? customCaption : undefined;
+    try {
+      await forwardQueuedMessage(messages[i].id, caption);
+      forwarded++;
+      // Short delay between album items (500ms) to keep them grouped
+      if (i < messages.length - 1) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    } catch {
+      // Continue with remaining items
+    }
+  }
+
+  logger.info(`Forwarded album (${forwarded}/${messages.length} items)`, undefined, 'forward');
+  return forwarded;
+}

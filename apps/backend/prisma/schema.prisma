@@ -49,6 +49,7 @@ model Message {
   fileSizeBytes Int      @default(0)
   thumbnail     String?  // base64 jpeg thumbnail
   cachePath     String?  // temp file path for downloaded media
+  albumId       String?  // groups consecutive media from same sender
   caption       String?  // editable caption to send when forwarding
   queueStatus   String   @default("none") // "none" | "queued" | "forwarding" | "forwarded" | "failed"
   forwarded     Boolean  @default(false)
@@ -60,6 +61,7 @@ model Message {
   @@unique([groupId, waMessageId])
   @@index([groupId, timestamp])
   @@index([queueStatus])
+  @@index([albumId])
 }
 
 model LogEntry {

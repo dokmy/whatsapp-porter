@@ -43,6 +43,7 @@ export async function connectToWhatsApp(): Promise<void> {
       keys: makeCacheableSignalKeyStore(state.keys, console),
     },
     generateHighQualityLinkPreview: false,
+    shouldSyncHistoryMessage: () => true,
   });
 
   sock.ev.on('creds.update', saveCreds);
