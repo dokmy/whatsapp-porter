@@ -13,4 +13,5 @@ export const settingsUpdateSchema = z.object({
   destinationGroupId: z.string().optional(),
   aiSystemPrompt: z.string().optional(),
   jarvisSystemPrompt: z.string().optional(),
+  geminiApiKey: z.string().optional(),
 });

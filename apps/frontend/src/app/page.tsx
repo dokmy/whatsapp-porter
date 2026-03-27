@@ -829,22 +829,24 @@ function ConfigPanel({ allGroups, monitored, unmonitoredGroups, addGroupId, setA
   updateSavePath: (id: string, p: string) => void;
   destinationId: string; saveDestination: (id: string) => void;
 }) {
+  const [geminiKey, setGeminiKey] = useState('');
   const [aiPrompt, setAiPrompt] = useState('');
   const [jarvisPrompt, setJarvisPrompt] = useState('');
   const [promptLoaded, setPromptLoaded] = useState(false);
   const [promptSaved, setPromptSaved] = useState(false);
 
   useEffect(() => {
-    apiFetch<{ aiSystemPrompt?: string; jarvisSystemPrompt?: string }>('/api/settings').then(s => {
+    apiFetch<{ geminiApiKey?: string; aiSystemPrompt?: string; jarvisSystemPrompt?: string }>('/api/settings').then(s => {
+      if (s.geminiApiKey) setGeminiKey(s.geminiApiKey);
       if (s.aiSystemPrompt) setAiPrompt(s.aiSystemPrompt);
       if (s.jarvisSystemPrompt) setJarvisPrompt(s.jarvisSystemPrompt);
       setPromptLoaded(true);
     }).catch(() => setPromptLoaded(true));
   }, []);
 
-  const savePrompt = async () => {
+  const saveSettings = async () => {
     await apiFetch('/api/settings', {
-      method: 'PUT', body: JSON.stringify({ aiSystemPrompt: aiPrompt, jarvisSystemPrompt: jarvisPrompt }),
+      method: 'PUT', body: JSON.stringify({ geminiApiKey: geminiKey, aiSystemPrompt: aiPrompt, jarvisSystemPrompt: jarvisPrompt }),
     }).catch(() => {});
     setPromptSaved(true);
     setTimeout(() => setPromptSaved(false), 2000);
@@ -906,6 +908,21 @@ function ConfigPanel({ allGroups, monitored, unmonitoredGroups, addGroupId, setA
         )}
       </section>
 
+      {/* Gemini API Key */}
+      <section className="space-y-3">
+        <h3 className="font-semibold text-gray-300">Gemini API Key</h3>
+        <p className="text-sm text-gray-500">Required for AI Draft and Jarvis. Get a key from Google AI Studio.</p>
+        {promptLoaded && (
+          <input
+            type="password"
+            value={geminiKey}
+            onChange={e => setGeminiKey(e.target.value)}
+            placeholder="AIzaSy..."
+            className="w-full px-4 py-2.5 bg-gray-800 border border-gray-700 rounded-lg text-sm font-mono focus:outline-none focus:border-gray-500"
+          />
+        )}
+      </section>
+
       {/* AI System Prompt */}
       <section className="space-y-3">
         <div className="flex items-center gap-2">
@@ -944,9 +961,9 @@ function ConfigPanel({ allGroups, monitored, unmonitoredGroups, addGroupId, setA
         )}
       </section>
 
-      <button onClick={savePrompt}
+      <button onClick={saveSettings}
         className="px-5 py-2 bg-purple-600 hover:bg-purple-500 rounded-lg text-sm font-medium transition-colors">
-        {promptSaved ? 'Saved!' : 'Save All Prompts'}
+        {promptSaved ? 'Saved!' : 'Save Settings'}
       </button>
     </div>
   );

@@ -45,12 +45,23 @@ async function getJarvisPrompt(): Promise<string> {
   return JARVIS_SYSTEM_PROMPT;
 }
 
+async function getGeminiKey(): Promise<string> {
+  const setting = await prisma.setting.findUnique({ where: { key: 'geminiApiKey' } });
+  if (setting) {
+    try { const v = JSON.parse(setting.value); if (v) return v; } catch { if (setting.value) return setting.value; }
+  }
+  return config.geminiApiKey;
+}
+
 async function callGemini(systemPrompt: string, contents: { role: string; parts: { text: string }[] }[]) {
+  const apiKey = await getGeminiKey();
+  if (!apiKey) throw new Error('Gemini API key not set. Go to Settings to add it.');
+
   const response = await fetch(GEMINI_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-goog-api-key': config.geminiApiKey,
+      'x-goog-api-key': apiKey,
     },
     body: JSON.stringify({
       system_instruction: { parts: [{ text: systemPrompt }] },
@@ -72,7 +83,7 @@ async function callGemini(systemPrompt: string, contents: { role: string; parts:
 router.post('/draft', async (req, res) => {
   const { groupId } = req.body;
   if (!groupId) return res.status(400).json({ error: 'groupId required' });
-  if (!config.geminiApiKey) return res.status(400).json({ error: 'Gemini API key not configured' });
+
 
   const messages = await prisma.message.findMany({
     where: { groupId },
@@ -105,7 +116,7 @@ router.post('/draft', async (req, res) => {
 router.post('/jarvis', async (req, res) => {
   const { question, history } = req.body;
   if (!question) return res.status(400).json({ error: 'question required' });
-  if (!config.geminiApiKey) return res.status(400).json({ error: 'Gemini API key not configured' });
+
 
   // Fetch recent messages from all monitored groups
   const monitored = await prisma.monitoredGroup.findMany({ where: { enabled: true } });
