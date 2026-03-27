@@ -12,6 +12,7 @@ import { usePrismaAuthState } from './authStore';
 import { logger } from '../utils/logger';
 import { onGroupsDiscovered } from './groupDiscovery';
 import { registerMessageHandler } from './messageHandler';
+import { catchUpQueue } from './catchup';
 
 let sock: WASocket | null = null;
 let currentStatus: ConnectionStatus = 'disconnected';
@@ -75,13 +76,21 @@ export async function connectToWhatsApp(): Promise<void> {
       setStatus('open');
       logger.info('Connected to WhatsApp');
 
-      // Discover groups after connection
       if (sock) {
         try {
           await onGroupsDiscovered(sock);
         } catch (err) {
           logger.error('Failed to discover groups', { error: String(err) });
         }
+
+        // Wait for history sync, then catch up queue
+        setTimeout(async () => {
+          try {
+            await catchUpQueue(sock);
+          } catch (err) {
+            logger.error('Catch-up scan failed', { error: String(err) });
+          }
+        }, 10_000); // 10s delay to let history sync finish
       }
     }
   });
