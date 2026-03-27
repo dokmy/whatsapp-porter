@@ -1,0 +1,82 @@
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model AuthState {
+  id        String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model Group {
+  id               String   @id
+  name             String
+  participantCount Int      @default(0)
+  pictureUrl       String?
+  discoveredAt     DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  monitored MonitoredGroup?
+  messages  Message[]
+}
+
+model MonitoredGroup {
+  id        String   @id @default(uuid())
+  groupId   String   @unique
+  group     Group    @relation(fields: [groupId], references: [id])
+  savePath  String   @default("")
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Message {
+  id            String   @id @default(uuid())
+  waMessageId   String
+  groupId       String
+  group         Group    @relation(fields: [groupId], references: [id])
+  senderJid     String
+  senderName    String   @default("")
+  content       String   @default("")
+  mediaType     String?
+  fileName      String?
+  mimetype      String?
+  fileSizeBytes Int      @default(0)
+  thumbnail     String?  // base64 jpeg thumbnail
+  cachePath     String?  // temp file path for downloaded media
+  caption       String?  // editable caption to send when forwarding
+  queueStatus   String   @default("none") // "none" | "queued" | "forwarding" | "forwarded" | "failed"
+  forwarded     Boolean  @default(false)
+  savedPath     String?
+  error         String?
+  timestamp     DateTime
+  createdAt     DateTime @default(now())
+
+  @@unique([groupId, waMessageId])
+  @@index([groupId, timestamp])
+  @@index([queueStatus])
+}
+
+model LogEntry {
+  id        Int      @id @default(autoincrement())
+  level     String
+  message   String
+  eventType String   @default("system") // "download" | "save" | "forward" | "queue" | "system" | "error"
+  context   String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([level])
+  @@index([eventType])
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}

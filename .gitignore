@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.next/
+out/
+*.db
+*.db-journal
+auth_info/
+media/
+.media-cache/
+.env
+.env.local
+.turbo

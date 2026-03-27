@@ -1,0 +1,24 @@
+{
+  "name": "whatsapp-porter",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "npm run dev -w apps/backend",
+    "dev:frontend": "npm run dev -w apps/frontend",
+    "build": "npm run build -w apps/frontend && npm run db:setup",
+    "build:frontend": "npm run build -w apps/frontend",
+    "db:setup": "cd apps/backend && npx prisma generate && npx prisma db push",
+    "db:migrate": "npm run db:migrate -w apps/backend",
+    "db:push": "npm run db:push -w apps/backend",
+    "db:studio": "npm run db:studio -w apps/backend",
+    "start": "cd apps/backend && npx tsx src/index.ts"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}
