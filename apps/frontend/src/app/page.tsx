@@ -643,6 +643,7 @@ function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
                 <QueueChip status={first.queueStatus} />
               </div>
               <p className="text-xs text-gray-400 mt-0.5">{di.items.length} media items</p>
+              <p className="text-[10px] text-gray-600 mt-0.5">Note: will be forwarded as individual images, not as an album</p>
               <p className="text-[10px] text-gray-600 mt-0.5">{new Date(first.timestamp).toLocaleString()}</p>
             </div>
             <div className="shrink-0 flex flex-col gap-1.5">
