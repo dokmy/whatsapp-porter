@@ -1,4 +1,4 @@
-import { DEFAULT_CAPTION_TEMPLATE } from '@whatsapp-porter/shared';
+import { CAPTION_TEMPLATES } from '@whatsapp-porter/shared';
 
 interface CaptionVars {
   groupName: string;
@@ -7,7 +7,10 @@ interface CaptionVars {
 }
 
 export function buildCaption(template: string | null | undefined, vars: CaptionVars): string {
-  const tpl = template && template.trim() ? template : DEFAULT_CAPTION_TEMPLATE;
+  // If a custom template is provided, use it. Otherwise pick a random variation.
+  const tpl = template && template.trim()
+    ? template
+    : CAPTION_TEMPLATES[Math.floor(Math.random() * CAPTION_TEMPLATES.length)];
 
   return tpl
     .replace(/\{groupName\}/g, vars.groupName)

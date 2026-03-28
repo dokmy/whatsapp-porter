@@ -23,6 +23,10 @@ export const DEFAULT_SETTINGS = {
   maxConcurrentDownloads: 2,
 } as const;
 
-export const DEFAULT_CAPTION_TEMPLATE = `📍 Source: {groupName}
-👤 From: {sender}
-📝 Original Caption: {originalCaption}`;
+export const CAPTION_TEMPLATES = [
+  `📍 Source: {groupName}\n👤 From: {sender}\n📝 Original Caption: {originalCaption}`,
+  `From {groupName}\nSent by: {sender}\n{originalCaption}`,
+  `{groupName} — {sender}\n{originalCaption}`,
+];
+
+export const DEFAULT_CAPTION_TEMPLATE = CAPTION_TEMPLATES[0];
