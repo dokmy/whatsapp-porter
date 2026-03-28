@@ -162,6 +162,7 @@ async function storeMessage(sock: WASocket, message: WAMessage, isHistory: boole
     });
 
     if (!isHistory) {
+      const groupRecord = await prisma.group.findUnique({ where: { id: remoteJid }, select: { name: true } });
       emit(SOCKET_EVENTS.MESSAGE_NEW, {
         id: stored.id,
         waMessageId,
@@ -178,6 +179,7 @@ async function storeMessage(sock: WASocket, message: WAMessage, isHistory: boole
         caption: stored.caption,
         queueStatus: stored.queueStatus,
         forwarded: false,
+        group: groupRecord,
         savedPath: null,
         error: null,
         timestamp: timestamp.toISOString(),

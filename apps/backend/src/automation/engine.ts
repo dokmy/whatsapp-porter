@@ -27,8 +27,6 @@ function getExtFromMime(mimetype: string | undefined, mediaType: MediaType): str
 
 /**
  * Forward a queued message by its DB id.
- * Reads media from the local cache (downloaded when the message arrived).
- * Uses the editable caption stored on the message.
  */
 export async function forwardQueuedMessage(messageId: string, customCaption?: string, skipJitter?: boolean): Promise<void> {
   const sock = getWASocket();
@@ -45,11 +43,9 @@ export async function forwardQueuedMessage(messageId: string, customCaption?: st
   const destinationId = await getDestinationGroupId();
   if (!destinationId) throw new Error('No destination group configured');
 
-  // Check cache file exists
   const cacheExists = await fs.pathExists(msg.cachePath);
   if (!cacheExists) throw new Error('Cached media file not found — it may have been cleaned up');
 
-  // Mark as forwarding
   await prisma.message.update({ where: { id: messageId }, data: { queueStatus: 'forwarding' } });
   emit(SOCKET_EVENTS.QUEUE_UPDATE, { id: messageId, queueStatus: 'forwarding' });
 
@@ -67,13 +63,9 @@ export async function forwardQueuedMessage(messageId: string, customCaption?: st
       logger.info(`Saved ${msg.mediaType} to ${savedPath}`, undefined, 'save');
     }
 
-    // Apply jitter (skip for album continuation items)
     if (!skipJitter) await applyJitter();
 
-    // Use custom caption if provided, otherwise use the stored one
     const caption = customCaption !== undefined ? customCaption : (msg.caption ?? '');
-
-    // Build send payload
     const mediaType = msg.mediaType as MediaType;
     const mediaContent: Record<string, unknown> = { caption };
 
@@ -94,7 +86,6 @@ export async function forwardQueuedMessage(messageId: string, customCaption?: st
 
     await sock.sendMessage(destinationId, mediaContent);
 
-    // Update status
     await prisma.message.update({
       where: { id: messageId },
       data: {
@@ -107,8 +98,6 @@ export async function forwardQueuedMessage(messageId: string, customCaption?: st
 
     emit(SOCKET_EVENTS.QUEUE_UPDATE, { id: messageId, queueStatus: 'forwarded' });
     logger.info(`Forwarded ${msg.mediaType} from "${msg.group.name}"`, undefined, 'forward');
-
-    // Clean up cache file after successful forward
     await fs.remove(msg.cachePath).catch(() => {});
 
   } catch (err) {
@@ -124,33 +113,99 @@ export async function forwardQueuedMessage(messageId: string, customCaption?: st
 }
 
 /**
- * Forward all messages in an album.
- * Sends them in quick succession so WhatsApp groups them visually as an album.
+ * Forward all messages in an album as a real WhatsApp album.
+ * Sends all images nearly simultaneously so WhatsApp groups them.
  */
 export async function forwardAlbum(albumId: string, customCaption?: string): Promise<number> {
+  const sock = getWASocket();
+  if (!sock) throw new Error('Not connected to WhatsApp');
+
   const messages = await prisma.message.findMany({
     where: { albumId, queueStatus: { in: ['queued', 'failed'] } },
+    include: { group: true },
     orderBy: { timestamp: 'asc' },
   });
 
   if (messages.length === 0) throw new Error('No queued messages in this album');
 
-  let forwarded = 0;
-  for (let i = 0; i < messages.length; i++) {
-    // Only first item gets the caption — rest must be empty for WhatsApp to group as album
-    const caption = i === 0 ? customCaption : '';
-    try {
-      await forwardQueuedMessage(messages[i].id, caption, i > 0);
-      forwarded++;
-      // Short delay between album items to keep them grouped
-      if (i < messages.length - 1) {
-        await new Promise(r => setTimeout(r, 300));
-      }
-    } catch {
-      // Continue with remaining items
+  const destinationId = await getDestinationGroupId();
+  if (!destinationId) throw new Error('No destination group configured');
+
+  // Mark all as forwarding
+  for (const msg of messages) {
+    await prisma.message.update({ where: { id: msg.id }, data: { queueStatus: 'forwarding' } });
+    emit(SOCKET_EVENTS.QUEUE_UPDATE, { id: msg.id, queueStatus: 'forwarding' });
+  }
+
+  // Apply jitter once before the album
+  await applyJitter();
+
+  // Read all buffers first
+  const mediaItems: { msg: typeof messages[0]; buffer: Buffer }[] = [];
+  for (const msg of messages) {
+    if (!msg.cachePath) continue;
+    const exists = await fs.pathExists(msg.cachePath);
+    if (!exists) continue;
+    const buffer = await fs.readFile(msg.cachePath);
+    mediaItems.push({ msg, buffer });
+  }
+
+  // Save all locally first
+  for (const { msg, buffer } of mediaItems) {
+    const monitored = await prisma.monitoredGroup.findUnique({ where: { groupId: msg.groupId } });
+    if (monitored?.savePath && monitored.savePath.trim()) {
+      const ext = getExtFromMime(msg.mimetype || undefined, msg.mediaType as MediaType);
+      const saveName = buildFileName(msg.fileName || undefined, ext, msg.mediaType!);
+      const savedPath = await saveFile(monitored.savePath, saveName, buffer);
+      await prisma.message.update({ where: { id: msg.id }, data: { savedPath } });
     }
   }
 
-  logger.info(`Forwarded album (${forwarded}/${messages.length} items)`, undefined, 'forward');
+  // Send all images as fast as possible — fire them all without waiting
+  const caption = customCaption !== undefined ? customCaption : (messages[0].caption ?? '');
+  const sendPromises = mediaItems.map(({ msg, buffer }, i) => {
+    const mediaType = msg.mediaType as MediaType;
+    const content: Record<string, unknown> = {
+      caption: i === 0 ? caption : '', // Only first gets caption
+    };
+
+    if (mediaType === 'image') {
+      content.image = buffer;
+      content.mimetype = msg.mimetype || 'image/jpeg';
+    } else if (mediaType === 'video') {
+      content.video = buffer;
+      content.mimetype = msg.mimetype || 'video/mp4';
+    }
+
+    return sock.sendMessage(destinationId, content);
+  });
+
+  // Fire all sends concurrently
+  const results = await Promise.allSettled(sendPromises);
+
+  let forwarded = 0;
+  for (let i = 0; i < mediaItems.length; i++) {
+    const { msg } = mediaItems[i];
+    const result = results[i];
+
+    if (result.status === 'fulfilled') {
+      await prisma.message.update({
+        where: { id: msg.id },
+        data: { queueStatus: 'forwarded', forwarded: true },
+      });
+      emit(SOCKET_EVENTS.QUEUE_UPDATE, { id: msg.id, queueStatus: 'forwarded' });
+      await fs.remove(msg.cachePath!).catch(() => {});
+      forwarded++;
+    } else {
+      const errorMsg = result.reason instanceof Error ? result.reason.message : String(result.reason);
+      await prisma.message.update({
+        where: { id: msg.id },
+        data: { queueStatus: 'failed', error: errorMsg },
+      });
+      emit(SOCKET_EVENTS.QUEUE_UPDATE, { id: msg.id, queueStatus: 'failed', error: errorMsg });
+    }
+  }
+
+  logger.info(`Forwarded album (${forwarded}/${mediaItems.length} items)`, undefined, 'forward');
   return forwarded;
 }
