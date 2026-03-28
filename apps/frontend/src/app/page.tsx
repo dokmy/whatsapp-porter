@@ -636,6 +636,8 @@ function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs text-gray-500">{(first as any).group?.name}</span>
+                <span className="text-gray-600">·</span>
                 <span className="text-sm font-medium">{first.senderName}</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/40 text-indigo-400 border border-indigo-800">Album ({di.items.length})</span>
                 <QueueChip status={first.queueStatus} />
@@ -678,6 +680,8 @@ function QueuePage({ socket }: { socket: ReturnType<typeof useSocket> }) {
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs text-gray-500">{(item as any).group?.name}</span>
+              <span className="text-gray-600">·</span>
               <span className="text-sm font-medium">{item.senderName}</span>
               <QueueChip status={item.queueStatus} />
             </div>
