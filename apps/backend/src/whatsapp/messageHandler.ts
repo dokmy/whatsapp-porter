@@ -193,6 +193,7 @@ async function storeMessage(sock: WASocket, message: WAMessage, isHistory: boole
 }
 
 export function registerMessageHandler(sock: WASocket): void {
+  // Handle individual messages (new + appended history)
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     const isHistory = type !== 'notify';
     for (const message of messages) {
@@ -202,6 +203,23 @@ export function registerMessageHandler(sock: WASocket): void {
         logger.error(`Error handling message: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
+  });
+
+  // Handle bulk history sync — this is where most history comes from
+  sock.ev.on('messaging-history.set', async ({ messages: historyMessages, isLatest }) => {
+    if (!historyMessages || historyMessages.length === 0) return;
+    logger.info(`History sync received: ${historyMessages.length} messages (isLatest: ${isLatest})`, undefined, 'system');
+
+    let stored = 0;
+    for (const message of historyMessages) {
+      try {
+        await storeMessage(sock, message, true);
+        stored++;
+      } catch {
+        // Skip errors
+      }
+    }
+    logger.info(`Stored ${stored} history messages`, undefined, 'system');
   });
 
   logger.info('Message handler registered');
