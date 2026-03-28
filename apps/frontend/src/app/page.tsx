@@ -227,7 +227,8 @@ export default function App() {
           <ChatView groupId={selectedGroupId}
             groupName={monitored.find(m => m.groupId === selectedGroupId)?.group.name
               || destGroup?.name || selectedGroupId}
-            messages={messages} />
+            messages={messages}
+            onReloadMessages={() => selectGroup(selectedGroupId)} />
         ) : (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center space-y-3">
@@ -242,15 +243,25 @@ export default function App() {
 }
 
 // ─── Chat View ───────────────────────────────────
-function ChatView({ groupId, groupName, messages }: {
-  groupId: string; groupName: string; messages: ChatMessage[];
+function ChatView({ groupId, groupName, messages, onReloadMessages }: {
+  groupId: string; groupName: string; messages: ChatMessage[]; onReloadMessages: () => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
   const [drafting, setDrafting] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+  const loadHistory = async () => {
+    setLoadingHistory(true);
+    try {
+      await apiFetch(`/api/monitored/${encodeURIComponent(groupId)}/load-history`, { method: 'POST' });
+      // Wait a few seconds for messages to arrive via history sync, then reload
+      setTimeout(() => { onReloadMessages(); setLoadingHistory(false); }, 5000);
+    } catch { setLoadingHistory(false); }
+  };
 
   const senderColor = (name: string) => {
     const colors = ['text-green-400','text-blue-400','text-purple-400','text-yellow-400','text-pink-400','text-cyan-400','text-orange-400','text-teal-400'];
@@ -299,9 +310,15 @@ function ChatView({ groupId, groupName, messages }: {
 
   return (
     <>
-      <div className="px-5 py-3 border-b border-gray-800 bg-gray-900 shrink-0">
-        <h2 className="font-semibold">{groupName}</h2>
-        <p className="text-xs text-gray-500">{messages.length} messages</p>
+      <div className="px-5 py-3 border-b border-gray-800 bg-gray-900 shrink-0 flex items-center justify-between">
+        <div>
+          <h2 className="font-semibold">{groupName}</h2>
+          <p className="text-xs text-gray-500">{messages.length} messages</p>
+        </div>
+        <button onClick={loadHistory} disabled={loadingHistory}
+          className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 bg-gray-800 hover:bg-gray-700 rounded-lg transition-colors disabled:opacity-50">
+          {loadingHistory ? 'Loading...' : 'Load History'}
+        </button>
       </div>
       <div className="flex-1 overflow-y-auto chat-scroll p-4 space-y-2">
         {messages.length === 0 ? (
