@@ -30,7 +30,7 @@ function getExtFromMime(mimetype: string | undefined, mediaType: MediaType): str
  * Reads media from the local cache (downloaded when the message arrived).
  * Uses the editable caption stored on the message.
  */
-export async function forwardQueuedMessage(messageId: string, customCaption?: string): Promise<void> {
+export async function forwardQueuedMessage(messageId: string, customCaption?: string, skipJitter?: boolean): Promise<void> {
   const sock = getWASocket();
   if (!sock) throw new Error('Not connected to WhatsApp');
 
@@ -67,11 +67,11 @@ export async function forwardQueuedMessage(messageId: string, customCaption?: st
       logger.info(`Saved ${msg.mediaType} to ${savedPath}`, undefined, 'save');
     }
 
-    // Apply jitter
-    await applyJitter();
+    // Apply jitter (skip for album continuation items)
+    if (!skipJitter) await applyJitter();
 
     // Use custom caption if provided, otherwise use the stored one
-    const caption = customCaption ?? msg.caption ?? '';
+    const caption = customCaption !== undefined ? customCaption : (msg.caption ?? '');
 
     // Build send payload
     const mediaType = msg.mediaType as MediaType;
@@ -137,14 +137,14 @@ export async function forwardAlbum(albumId: string, customCaption?: string): Pro
 
   let forwarded = 0;
   for (let i = 0; i < messages.length; i++) {
-    // Only apply caption to the first item, and only apply jitter before the first
-    const caption = i === 0 ? customCaption : undefined;
+    // Only first item gets the caption — rest must be empty for WhatsApp to group as album
+    const caption = i === 0 ? customCaption : '';
     try {
-      await forwardQueuedMessage(messages[i].id, caption);
+      await forwardQueuedMessage(messages[i].id, caption, i > 0);
       forwarded++;
-      // Short delay between album items (500ms) to keep them grouped
+      // Short delay between album items to keep them grouped
       if (i < messages.length - 1) {
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 300));
       }
     } catch {
       // Continue with remaining items
